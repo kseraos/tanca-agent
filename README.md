@@ -72,24 +72,6 @@ Este agente permite que o sistema **iComanda** envie comandos **TSPL/ZPL** diret
 
 ---
 
-## ✅ Teste
-
-Verifique a saúde do agente acessando no navegador:  
-
-👉 [http://127.0.0.1:9317/health](http://127.0.0.1:9317/health)  
-
-Resposta esperada:
-```json
-{ 
-  "ok": true, 
-  "printer": "TANCA_Label", 
-  "authRequired": true, 
-  "origins": ["http://localhost"]
-}
-```
-
----
-
 ## 🚀 Execução Contínua
 
 ### Windows
@@ -159,6 +141,22 @@ Resposta esperada:
    ```
 
 ---
+
+## ✅ Teste
+
+Verifique a saúde do agente acessando no navegador:  
+
+👉 [http://127.0.0.1:9317/health](http://127.0.0.1:9317/health)  
+
+Resposta esperada:
+```json
+{ 
+  "ok": true, 
+  "printer": "TANCA_Label", 
+  "authRequired": true, 
+  "origins": ["http://localhost"]
+}
+```
 
 ## 🎯 Conclusão
 
