@@ -1,6 +1,20 @@
-# Agente de Impressão iComanda (TANCA)
+# 🖨️ Agente de Impressão iComanda (TANCA)
 
-Este agente permite que o sistema **iComanda** envie comandos TSPL para impressoras TANCA conectadas a um computador cliente.
+Este agente permite que o sistema **iComanda** envie comandos **TSPL/ZPL** diretamente para impressoras **TANCA** conectadas a um computador cliente.
+
+---
+
+## 📑 Índice
+- [📌 Pré-requisitos](#-pré-requisitos)
+- [🖨️ Configuração da Impressora](#️-configuração-da-impressora)
+- [⚙️ Instalação do Agente](#️-instalação-do-agente)
+- [✅ Teste](#-teste)
+- [🚀 Execução Contínua](#-execução-contínua)
+  - [Windows](#windows)
+  - [Linux (Systemd)](#linux-systemd)
+- [🎯 Conclusão](#-conclusão)
+
+---
 
 ## 📌 Pré-requisitos
 
@@ -8,6 +22,8 @@ Este agente permite que o sistema **iComanda** envie comandos TSPL para impresso
 - Impressora instalada no sistema (Windows ou Linux)  
 - Node.js 18+ instalado  
 - Acesso de rede entre o sistema web e o cliente (IP fixo ou hostname)  
+
+---
 
 ## 🖨️ Configuração da Impressora
 
@@ -32,6 +48,8 @@ Este agente permite que o sistema **iComanda** envie comandos TSPL para impresso
    ```
 4. Anote o nome exato (ex.: `TANCA_Label`).  
 
+---
+
 ## ⚙️ Instalação do Agente
 
 ### Passos comuns (Windows e Linux)
@@ -43,13 +61,22 @@ Este agente permite que o sistema **iComanda** envie comandos TSPL para impresso
    ```bash
    npm install
    ```
-5. Configure o arquivo `.env` (crie se não existir).  
+5. Configure o arquivo `.env` (crie se não existir):  
+   ```ini
+   PRINTER_NAME=TANCA_Label
+   PORT=9317
+   ALLOWED_ORIGINS=http://localhost,http://127.0.0.1,http://seu-dominio.com
+   API_TOKEN=/seu-token-aqui
+   PULL_INTERVAL_MS=4000
+   ```
+
+---
 
 ## ✅ Teste
 
 Verifique a saúde do agente acessando no navegador:  
 
-[http://127.0.0.1:9317/health](http://127.0.0.1:9317/health)  
+👉 [http://127.0.0.1:9317/health](http://127.0.0.1:9317/health)  
 
 Resposta esperada:
 ```json
@@ -57,9 +84,11 @@ Resposta esperada:
   "ok": true, 
   "printer": "TANCA_Label", 
   "authRequired": true, 
-  "origins": [...] 
+  "origins": ["http://localhost"]
 }
 ```
+
+---
 
 ## 🚀 Execução Contínua
 
@@ -85,6 +114,8 @@ Resposta esperada:
    - O agente será iniciado automaticamente em segundo plano.  
    - Confirme acessando: [http://localhost:9317/health](http://localhost:9317/health)  
 
+---
+
 ### Linux (Systemd)
 
 1. Crie o serviço systemd:
@@ -109,30 +140,25 @@ Resposta esperada:
    [Install]
    WantedBy=multi-user.target
    ```
-
 3. Recarregue e habilite o serviço:
    ```bash
    sudo systemctl daemon-reload
    sudo systemctl enable --now tanca-agent
    ```
-
 4. Verifique se está rodando:
    ```bash
    systemctl status tanca-agent --no-pager
    ```
-
 5. Teste o agente:
    ```bash
    curl -s http://127.0.0.1:9317/health
    ```
-
 6. Envie um teste de impressão:
    ```bash
-   curl -X POST http://127.0.0.1:9317/print \
-     -H "Content-Type: application/json" \
-     -H "Authorization: Bearer /seu-token-aqui" \
-     --data-binary '{"tspl":"SIZE 40 mm,30 mm\r\nGAP 3 mm,0\r\nCLS\r\nTEXT 10,10,\"3\",0,1,1,\"Teste OK\"\r\nPRINT 1\r\n"}'
+   curl -X POST http://127.0.0.1:9317/print      -H "Content-Type: application/json"      -H "Authorization: Bearer /seu-token-aqui"      --data-binary '{"tspl":"SIZE 40 mm,30 mm\r\nGAP 3 mm,0\r\nCLS\r\nTEXT 10,10,\"3\",0,1,1,\"Teste OK\"\r\nPRINT 1\r\n"}'
    ```
+
+---
 
 ## 🎯 Conclusão
 
