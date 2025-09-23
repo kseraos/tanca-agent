@@ -1,7 +1,7 @@
 {
   "name": "tanca-agent",
   "version": "1.0.0",
-  "description": "",
+  "description": "Este agente permite que o sistema **iComanda** envie comandos **TSPL/ZPL** diretamente para impressoras **TANCA** conectadas a um computador cliente.",
   "main": "server.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
@@ -13,5 +13,14 @@
   "dependencies": {
     "dotenv": "^17.2.2",
     "express": "^5.1.0"
-  }
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/kseraos/tanca-agent.git"
+  },
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/kseraos/tanca-agent/issues"
+  },
+  "homepage": "https://github.com/kseraos/tanca-agent#readme"
 }
