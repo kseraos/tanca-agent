@@ -1,0 +1,111 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>iComanda – Bridge de Impressão</title>
+<style>
+  body{font:14px/1.4 system-ui,sans-serif;margin:24px}
+  .ok{color:#0a0}.err{color:#a00}
+</style>
+<h3>Bridge de Impressão</h3>
+<div id="status">Aguardando dados…</div>
+<script>
+  // === TOKEN ===
+  const LS_KEY = "icomanda_bridge_api_token";
+
+  function getToken(){
+    const url = new URL(location.href);
+    const qtok = url.searchParams.get("token");
+    if (qtok) {
+      localStorage.setItem(LS_KEY, qtok);
+      return qtok.trim();
+    }
+    const lst = (localStorage.getItem(LS_KEY) || "").trim();
+    if (lst) return lst;
+    const ask = prompt("Informe o API_TOKEN (apenas uma vez):", "");
+    if (ask && ask.trim()) {
+      localStorage.setItem(LS_KEY, ask.trim());
+      return ask.trim();
+    }
+    return ""; // sem token (se o servidor não exigir, ainda funciona)
+  }
+
+  function clearToken(){
+    localStorage.removeItem(LS_KEY);
+    alert("Token limpo. Recarregue e informe novamente.");
+    location.reload();
+  }
+
+  const API_TOKEN = getToken();
+  const statusEl = document.getElementById('status');
+
+  async function imprimir(tspl, clientIp){
+    statusEl.textContent = "Enviando para impressora…";
+    try{
+      const headers = { "Content-Type": "application/json" };
+      if (API_TOKEN) headers["Authorization"] = "Bearer " + API_TOKEN;
+
+      const r = await fetch("/print", {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ tspl, client_ip: clientIp || "" })
+      });
+
+      const text = await r.text();
+      if(!r.ok) throw new Error(text || "Falha");
+      statusEl.innerHTML = '<span class="ok">Impressão enviada ✔</span>';
+      try { window.opener && window.opener.postMessage({ ok:true, from:"bridge" }, "*"); } catch(e) {}
+
+      function tryCloseSequence(){
+        // 1) tentativa direta
+        window.close();
+
+        // 2) iOS/Android fallback: trocar pra about:blank e tentar fechar
+        setTimeout(()=>{
+          try { window.location.replace("about:blank"); } catch(e) {}
+          setTimeout(()=>{ try { window.close(); } catch(e) {} }, 50);
+        }, 80);
+      }
+
+      // dá um tempo pro postMessage chegar no pai
+      setTimeout(tryCloseSequence, 120);
+
+      // botão manual visível em mobile (quando tudo falhar)
+      setTimeout(()=>{
+        if (!document.getElementById("btn-fechar-bridge")) {
+          const b = document.createElement("button");
+          b.id = "btn-fechar-bridge";
+          b.textContent = "Fechar";
+          b.style = "margin-top:12px;padding:8px 12px";
+          b.onclick = tryCloseSequence; // gesto do usuário ajuda alguns browsers
+          statusEl.appendChild(b);
+        }
+      }, 250);
+
+
+    }catch(err){
+      statusEl.innerHTML = '<span class="err">Erro: ' + (err.message||err) + '</span>'
+        + '<div><button onclick="clearToken()">Limpar token</button></div>';
+      try{ window.opener && window.opener.postMessage({ok:false, error:String(err), from:"bridge"}, "*"); }catch(e){}
+    }
+  }
+
+  // 1) recebe via postMessage
+  window.addEventListener("message", (ev)=>{
+    const d = ev.data || {};
+    if(d && d.type === "PRINT" && d.tspl){
+      imprimir(d.tspl, d.clientIp);
+    }
+  });
+
+  // 2) fallback por hash (#b64=<base64>)
+  (function(){
+    const h = location.hash || "";
+    const m = h.match(/b64=([^&]+)/);
+    if(m){
+      try{
+        const json = atob(decodeURIComponent(m[1]));
+        const obj = JSON.parse(json);
+        if(obj && obj.tspl) imprimir(obj.tspl, obj.clientIp||"");
+      }catch(e){}
+    }
+  })();
+</script>

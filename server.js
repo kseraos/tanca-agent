@@ -4,212 +4,255 @@ const { execFile } = require("child_process");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+require("dotenv").config(); // ✅ carrega .env antes de ler variáveis
+const bonjourLib = require("bonjour");
 
-// ==== .env ====
-try {
-  require("dotenv").config({ debug: true });
-} catch (e) {
-  console.error("[dotenv] falhou ao carregar .env:", e?.message || e);
-}
-
-// ==== ENV ====
-const PRINTER = (process.env.PRINTER_NAME || "TANCA_Label").trim();
+// ==== Configurações (.env) ====
 const PORT = parseInt(process.env.PORT || "9317", 10);
+const PRINTER = (process.env.PRINTER_NAME || "TANCA_Label").trim();
 const API_TOKEN = (process.env.API_TOKEN || "").trim();
-
+const BRIDGE_NAME = (process.env.BRIDGE_NAME || "icomanda-bridge").trim(); // ✅ agora lê do .env
+const HOSTNAME = os.hostname();
 const ALLOWED = new Set(
   (process.env.ALLOWED_ORIGINS || "http://localhost,http://127.0.0.1")
     .split(",")
     .map(s => s.trim())
     .filter(Boolean)
 );
-
 const isWin = process.platform === "win32";
 
-// ==== APP ====
+// ==== Inicializa app ====
 const app = express();
+app.use(express.json({ limit: "256kb" }));
 
-// ---- CORS ----
+// ---- Middleware CORS global ----
 app.use((req, res, next) => {
   const origin = req.headers.origin;
   if (origin && ALLOWED.has(origin)) {
     res.setHeader("Access-Control-Allow-Origin", origin);
+    res.setHeader("Vary", "Origin");
   }
-  res.setHeader("Vary", "Origin");
   res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
-  const acrh = req.headers["access-control-request-headers"];
   res.setHeader(
     "Access-Control-Allow-Headers",
-    acrh ? acrh : "Content-Type, Authorization, X-API-Token"
+    req.headers["access-control-request-headers"] ||
+      "Content-Type, Authorization, X-API-Token"
   );
-  res.setHeader("Access-Control-Max-Age", "600");
-
-  if (
-    req.method === "OPTIONS" &&
-    req.headers["access-control-request-private-network"] === "true"
-  ) {
-    res.setHeader("Access-Control-Allow-Private-Network", "true");
-  }
-
-  if (req.method === "OPTIONS") return res.sendStatus(204);
+  // Safari / iOS Private Network Access
+  res.setHeader("Access-Control-Allow-Private-Network", "true");
   next();
 });
 
-app.use(express.json({ limit: "256kb" }));
+// ---- Rota OPTIONS / Preflight ----
+app.options("/print", (req, res) => {
+  console.log(
+    `[preflight] /print origin=${req.headers.origin || ""} acrpn=${
+      req.headers["access-control-request-private-network"] || ""
+    } req-headers=${req.headers["access-control-request-headers"] || ""}`
+  );
+  res.setHeader("Access-Control-Allow-Methods", "POST, GET, OPTIONS");
+  res.setHeader(
+    "Access-Control-Allow-Headers",
+    req.headers["access-control-request-headers"] ||
+      "Content-Type, Authorization, X-API-Token"
+  );
+  res.setHeader("Access-Control-Allow-Private-Network", "true");
+  res.setHeader("Access-Control-Max-Age", "600");
+  return res.sendStatus(204);
+});
 
-// ---- Auth helper ----
+// ---- Autenticação ----
 function checkAuth(req, res, next) {
   if (!API_TOKEN) return next();
   const hAuth = req.headers.authorization || "";
-  const hTok  = req.headers["x-api-token"] || "";
-  let ok = false;
-
-  if (hAuth.startsWith("Bearer ")) ok = hAuth.slice(7).trim() === API_TOKEN;
-  if (!ok && hTok) ok = String(hTok).trim() === API_TOKEN;
-
+  const hTok = req.headers["x-api-token"] || "";
+  const ok =
+    (hAuth.startsWith("Bearer ") && hAuth.slice(7).trim() === API_TOKEN) ||
+    (hTok && String(hTok).trim() === API_TOKEN);
   if (!ok) return res.status(401).json({ ok: false, error: "unauthorized" });
   next();
 }
 
-// ---- Helpers de rede ----
-function getLocalIPv4Info() {
-  const ifaces = os.networkInterfaces();
-  const interfaces = [];
-  for (const name of Object.keys(ifaces)) {
-    for (const it of ifaces[name] || []) {
-      interfaces.push({
-        name,
-        address: it.address,
-        family: it.family,
-        internal: it.internal === true,
-      });
-    }
-  }
-  const cand = interfaces.find(it =>
-    /^IPv4$/i.test(it.family) &&
-    !it.internal &&
-    (it.address.startsWith("192.168.") ||
-     it.address.startsWith("10.") ||
-     /^172\.(1[6-9]|2\d|3[0-1])\./.test(it.address))
-  );
-  return { ipv4_local: cand ? cand.address : "", interfaces };
-}
-
-// ---- Print helper ----
+// ---- Função de envio para impressora ----
 function sendToPrinter(tmpFile, cb) {
   if (!isWin) {
-    // Linux/macOS → CUPS
     return execFile("lpr", ["-P", PRINTER, "-o", "raw", tmpFile], (err, so, se) => {
-      if (err) err.message = `[lpr] ${err.message} :: ${se || ""}`;
-      cb(err || null);
+      if (err) return cb(new Error(`[lpr] ${se || err.message || so || "falha"}`));
+      cb(null);
     });
   }
 
-  // Windows → NÃO usar lpr. Tentar PowerShell; se falhar, copy /b para \\localhost\PRINTER
-  const psArgs = [
-    "-NoProfile",
-    "-Command",
-    "$ErrorActionPreference='Stop';" +
-    `Get-Printer -Name '${PRINTER}' | Out-Null;` +
-    `Get-Content -LiteralPath '${tmpFile.replace(/'/g,"''")}' -Raw | Out-Printer -Name '${PRINTER}';`
-  ];
+  const share = (process.env.PRINTER_SHARE || "").trim() || PRINTER;
+  const uncLocalhost = `\\\\localhost\\${share}`;
+  const uncLoopback = `\\\\127.0.0.1\\${share}`;
 
-  execFile("powershell", psArgs, (psErr, so, se) => {
-    if (!psErr) return cb(null);
+  // 1) print
+  execFile("print", ["/D:" + uncLocalhost, tmpFile], { windowsHide: true }, (err1, so1, se1) => {
+    if (!err1) return cb(null);
 
-    const share = `\\\\localhost\\${PRINTER}`;
-    execFile("cmd", ["/c", "copy", "/b", tmpFile, share], (copyErr, so2, se2) => {
-      if (!copyErr && /1 arquivo\(s\) copiado\(s\)|1 file\(s\) copied/i.test(so2 || "")) {
-        return cb(null);
-      }
-      const errMsg = copyErr ? copyErr.message : (se2 || "falha no copy /b");
-      cb(new Error(`[ps:${se?.trim()||psErr?.message}] [copy:${errMsg}]`));
+    // 2) copy localhost
+    execFile("cmd", ["/c", "copy", "/b", tmpFile, uncLocalhost], { windowsHide: true }, (err2, so2, se2) => {
+      if (!err2) return cb(null);
+
+      // 3) copy 127.0.0.1
+      execFile("cmd", ["/c", "copy", "/b", tmpFile, uncLoopback], { windowsHide: true }, (err3, so3, se3) => {
+        const msg =
+          `[print] ${se1 || so1 || err1?.message || ""} | ` +
+          `[copy localhost] ${se2 || so2 || err2?.message || ""} | ` +
+          `[copy 127.0.0.1] ${se3 || so3 || err3?.message || ""}`;
+        cb(new Error(msg || "falha ao enviar para a impressora"));
+      });
     });
   });
 }
 
-// ---- Rotas ----
+// ---- Logs resumidos ----
+app.use((req, res, next) => {
+  if (req.method === "OPTIONS" || req.path === "/print") {
+    console.log(
+      `[req] ${req.method} ${req.path} origin=${req.headers.origin || ""} acrpn=${
+        req.headers["access-control-request-private-network"] || ""
+      } auth=${(req.headers.authorization || "").slice(0, 14)}…`
+    );
+  }
+  next();
+});
+
+// ---- Bridge de Impressão (token do .env injetado) ----
+app.get("/bridge.html", (req, res) => {
+  const html = `
+<!doctype html>
+<meta charset="utf-8" />
+<title>iComanda – Bridge de Impressão</title>
+<style>
+  body{font:14px/1.4 system-ui,sans-serif;margin:24px}
+  .ok{color:#0a0}.err{color:#a00}
+</style>
+<h3>Bridge de Impressão</h3>
+<div id="status">Aguardando dados…</div>
+<script>
+  const API_TOKEN = ${JSON.stringify(API_TOKEN)};
+  const statusEl = document.getElementById('status');
+
+  async function imprimir(tspl, clientIp){
+    statusEl.textContent = "Enviando para impressora…";
+    try{
+      const r = await fetch("/print", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": "Bearer " + API_TOKEN
+        },
+        body: JSON.stringify({ tspl, client_ip: clientIp || "" })
+      });
+      const text = await r.text();
+      if(!r.ok) throw new Error(text || "Falha");
+      statusEl.innerHTML = '<span class="ok">Impressão enviada ✔</span>';
+      try{ window.opener && window.opener.postMessage({ok:true, from:"bridge"}, "*"); }catch(e){}
+      setTimeout(()=> window.close(), 800);
+    }catch(err){
+      statusEl.innerHTML = '<span class="err">Erro: ' + (err.message||err) + '</span>';
+      try{ window.opener && window.opener.postMessage({ok:false, error:String(err), from:"bridge"}, "*"); }catch(e){}
+    }
+  }
+
+  window.addEventListener("message", (ev)=>{
+    const d = ev.data || {};
+    if(d && d.type === "PRINT" && d.tspl){
+      imprimir(d.tspl, d.clientIp);
+    }
+  });
+
+  (function(){
+    const h = location.hash || "";
+    const m = h.match(/b64=([^&]+)/);
+    if(m){
+      try{
+        const json = atob(decodeURIComponent(m[1]));
+        const obj = JSON.parse(json);
+        if(obj && obj.tspl) imprimir(obj.tspl, obj.clientIp||"");
+      }catch(e){}
+    }
+  })();
+</script>
+  `;
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.setHeader("Cache-Control", "no-store"); // evita cache do token
+  res.send(html);
+});
+
+// ---- Arquivos estáticos ----
+app.use(express.static(path.join(__dirname, "public")));
+
+// ---- Rota de saúde ----
 app.get("/health", (req, res) => {
-  const net = getLocalIPv4Info();
+  const ipv4 = Object.values(os.networkInterfaces())
+    .flat()
+    .find(it => it.family === "IPv4" && !it.internal);
+  res.setHeader("Access-Control-Allow-Private-Network", "true");
   res.json({
     ok: true,
     printer: PRINTER,
-    authRequired: Boolean(API_TOKEN),
-    origins: [...ALLOWED],
-    ipv4_local: net.ipv4_local,
-    interfaces: net.interfaces
+    authRequired: !!API_TOKEN,
+    ipv4_local: ipv4 ? ipv4.address : "",
+    origins: [...ALLOWED]
   });
 });
 
-// compatibilidade opcional com seu front
-app.get("/whoami", (req, res) => {
-  res.json(getLocalIPv4Info());
-});
-
+// ---- Rota de impressão ----
 app.post("/print", checkAuth, (req, res) => {
-  try {
-    const { tspl, client_ip } = req.body || {};
-    if (!tspl || typeof tspl !== "string") {
-      return res.status(400).send("Faltou o campo 'tspl' (string).");
-    }
-    const tmpFile = path.join(os.tmpdir(), `tspl-${Date.now()}.tspl`);
-    fs.writeFileSync(tmpFile, tspl, "utf8");
-
-    console.log(`[print] destino="${PRINTER}" ip_cliente="${client_ip || req.ip}" file=${tmpFile}`);
-
-    sendToPrinter(tmpFile, (err) => {
-      fs.unlink(tmpFile, () => {});
-      if (err) {
-        console.error("[print] erro:", err.message || err);
-        return res.status(500).send("Erro ao imprimir: " + (err.message || err));
-      }
-      console.log(`[print] enviado para ${PRINTER}`);
-      res.send("Enviado para impressão.");
-    });
-  } catch (e) {
-    console.error("[print] exceção:", e);
-    res.status(500).send("Falha inesperada.");
+  const { tspl, client_ip } = req.body || {};
+  if (!tspl || typeof tspl !== "string") {
+    return res.status(400).json({ error: "Faltou o campo 'tspl' (string)." });
   }
+
+  const tmpFile = path.join(os.tmpdir(), `tspl-${Date.now()}.tspl`);
+  fs.writeFileSync(tmpFile, tspl, "utf8");
+
+  console.log(`[print] cliente=${client_ip || req.ip}, impressora=${PRINTER}`);
+  sendToPrinter(tmpFile, err => {
+    fs.unlink(tmpFile, () => {});
+    if (err) {
+      console.error("[print] erro:", err.message);
+      return res.status(500).json({ error: err.message });
+    }
+    console.log(`[print] etiqueta enviada para ${PRINTER}`);
+    res.setHeader("Access-Control-Allow-Private-Network", "true");
+    res.json({ ok: true, message: "Enviado para impressão." });
+  });
 });
 
-// ==== Startup/diagnóstico ====
-let server;
-try {
-  server = app.listen(PORT, "0.0.0.0");
-  server.on("listening", () => {
-    const hint = API_TOKEN ? `${API_TOKEN.slice(0,4)}…${API_TOKEN.slice(-3)}` : "(sem token)";
-    console.log(`Agente na porta ${PORT}. Impressora: ${PRINTER}. TOKEN: ${hint}`);
-  });
-  server.on("error", (err) => {
-    console.error("[server] erro no listen:", err.code, err.message);
-    process.exitCode = 1;
-  });
-  server.on("close", () => {
-    console.error("[server] servidor foi fechado (close).");
-  });
-} catch (e) {
-  console.error("[listen] exceção:", e);
-  process.exit(1);
-}
+// ---- Inicializa servidor + mDNS/Bonjour ----
+const server = app.listen(PORT, "0.0.0.0", () => {
+  console.log(`Servidor ativo na porta ${PORT} (impressora: ${PRINTER})`);
 
-// ==== Handlers globais ====
-process.on("uncaughtException", (err) => {
-  console.error("[uncaughtException]", err);
-});
-process.on("unhandledRejection", (reason, p) => {
-  console.error("[unhandledRejection] em Promise:", p, "razão:", reason);
-});
-process.on("SIGINT", () => {
-  console.error("[signal] SIGINT recebido. Encerrando…");
-  server?.close(() => process.exit(0));
-});
-process.on("SIGTERM", () => {
-  console.error("[signal] SIGTERM recebido. Encerrando…");
-  server?.close(() => process.exit(0));
-});
-process.on("beforeExit", (code) => {
-  console.error("[beforeExit] código:", code);
-});
-process.on("exit", (code) => {
-  console.error("[exit] código:", code);
+  // mDNS/Bonjour: anuncia o bridge na rede local
+  const bonjour = bonjourLib();
+  const service = bonjour.publish({
+    name: BRIDGE_NAME,  // ex.: "icomanda-bridge"
+    type: "http",       // _http._tcp
+    port: PORT,         // 9317
+    host: HOSTNAME,     // opcional
+    txt: {
+      path: "/",
+      printer: PRINTER,
+      auth: API_TOKEN ? "required" : "none"
+    }
+  });
+
+  service.on("up", () => {
+    console.log(`[mDNS] Serviço divulgado como: ${BRIDGE_NAME}.local:${PORT}`);
+  });
+
+  // Encerramento limpo
+  const shutdown = () => {
+    console.log("\nEncerrando bridge...");
+    try { service.stop(() => console.log("[mDNS] Serviço removido.")); } catch {}
+    try { bonjour.destroy(); } catch {}
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(0), 2000).unref();
+  };
+
+  process.on("SIGINT", shutdown);
+  process.on("SIGTERM", shutdown);
 });
